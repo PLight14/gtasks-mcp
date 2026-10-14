@@ -1,0 +1,15 @@
+name = "gtasks-mcp"
+main = "src/index.ts"
+compatibility_date = "2026-09-01"
+
+[durable_objects]
+bindings = [{ name = "OAUTH", class_name = "OAuthVault" }]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["OAuthVault"]
+
+[vars]
+# Replace with the Web application client id from Google Cloud. A secret of the same name overrides this.
+GOOGLE_CLIENT_ID = "350799599363-h0or8rsmonqjnqacvgvv3iln4g5sjcvg.apps.googleusercontent.com"
+MAX_ACCOUNTS = "1"
