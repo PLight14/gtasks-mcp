@@ -106,42 +106,20 @@ async function sha256Hex(value: string): Promise<string> {
 }
 const BLOCKED_REDIRECT_SCHEMES = new Set(["javascript", "data", "file", "blob", "vbscript", "about"]);
 const GROK_CLIENT_ID = "grokbot";
-const GROK_HTTPS_HOSTS = new Set(["www.cursor.com", "cursor.com", "grok.com"]);
-// The exact Grok Bot callback is not pinned. Paths still have to look like an OAuth callback:
-// an oauth segment ending in callback, the Grok web connector path, or the Cursor scheme callback. Loopback is refused.
-function grokPath(pathname: string): string | null {
-  if (!pathname.startsWith("/") || pathname.length > 200 || pathname.includes("//") || pathname.includes("\\")) return null;
-  const bare = pathname.length > 1 && pathname.endsWith("/") ? pathname.slice(0, -1) : pathname;
-  const segments = bare.slice(1).split("/");
-  if (segments.length < 1 || segments.length > 8) return null;
-  if (segments.some((segment) => segment === "." || segment === ".." || !/^[A-Za-z0-9._~-]{1,64}$/.test(segment))) return null;
-  return bare;
-}
-function grokOauthCallback(pathname: string): boolean {
-  const bare = grokPath(pathname);
-  if (!bare) return false;
-  const segments = bare.slice(1).split("/");
-  return segments.length >= 2 && segments[segments.length - 1] === "callback" && segments.includes("oauth");
-}
+const GROK_REDIRECTS = new Set([
+  "https://www.cursor.com/agents/mcp/oauth/callback",
+  "https://www.cursor.com/bot/mcp/oauth/callback",
+  "https://grok.com/connectors-oauth-exchange-code/",
+  "cursor://anysphere.cursor-mcp/oauth/callback",
+  "http://localhost:8787/callback",
+  "http://127.0.0.1:8787/callback",
+]);
 function grokRedirect(value: string): boolean {
   if (value.length > 2000 || value.includes("#") || /[\u0000-\u001f\s]/.test(value)) return false;
   let url: URL;
   try { url = new URL(value); } catch { return false; }
   if (url.username || url.password || url.search) return false;
-  const scheme = url.protocol.replace(":", "").toLowerCase();
-  const host = url.hostname.toLowerCase();
-  if (scheme === "https" && GROK_HTTPS_HOSTS.has(host) && !url.port) {
-    return grokOauthCallback(url.pathname) || (host === "grok.com" && grokPath(url.pathname) === "/connectors-oauth-exchange-code");
-  }
-  return scheme === "cursor" && host === "anysphere.cursor-mcp" && !url.port && grokPath(url.pathname) === "/oauth/callback";
-}
-function ignoredLoopback(value: string): boolean {
-  if (value.length > 2000 || value.includes("#") || /[\u0000-\u001f\s]/.test(value)) return false;
-  let url: URL;
-  try { url = new URL(value); } catch { return false; }
-  if (url.username || url.password) return false;
-  const host = url.hostname.toLowerCase();
-  return url.protocol === "http:" && (host === "localhost" || host === "127.0.0.1");
+  return GROK_REDIRECTS.has(url.href);
 }
 function clientName(value: unknown, fallback: string): string {
   const raw = typeof value === "string" ? value : "";
@@ -1389,7 +1367,7 @@ async function registerClient(request: Request): Promise<Response> {
   const uris = body?.redirect_uris;
   const sent = Array.isArray(uris) ? uris.filter((uri): uri is string => typeof uri === "string") : [];
   const accepted = sent.filter((uri) => grokRedirect(uri));
-  const listed = Array.isArray(uris) && uris.length >= 1 && uris.length <= 8 && sent.length === uris.length && accepted.length >= 1 && sent.every((uri) => grokRedirect(uri) || ignoredLoopback(uri));
+  const listed = Array.isArray(uris) && uris.length >= 1 && uris.length <= 8 && sent.length === uris.length && sent.length === accepted.length;
   if (!listed) {
     const logged = sent.map((uri) => uri.slice(0, 300));
     console.log(JSON.stringify({ registration: "invalid_redirect_uri", redirect_uris: logged }));
