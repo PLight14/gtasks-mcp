@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/server";
 import { createMcpHandler } from "agents/mcp/server";
 import { DurableObject } from "cloudflare:workers";
 import { z } from "zod";
+import { MONITOR_TASK_QUERY, googleUpdatedMin, grokWebhookUrl, parseCursor, runMonitor, webhookAccepted, webhookKey, type MonitorBody, type MonitorCursor } from "./monitor";
 
 const GOOGLE_SCOPE = "openid email https://www.googleapis.com/auth/tasks";
 const TASKS_SCOPE = "https://www.googleapis.com/auth/tasks";
@@ -458,6 +459,29 @@ export class OAuthVault extends DurableObject<Env> {
       const user = stored ? linkedAccount(stored.user) : null;
       if (!stored || !user) return { connected: false };
       return { connected: true, account: { user, access_expires_at: new Date(stored.expires_at).toISOString() } };
+    });
+  }
+
+  async connectedAccounts(): Promise<LinkedAccount[]> {
+    return this.exclusive(async () => {
+      const tag = await credentialTag(clientId(this.env), clientSecret(this.env));
+      return [...(await this.grantMap(tag)).values()].map((grant) => grant.user);
+    });
+  }
+
+  async monitorCursor(userId: string): Promise<unknown> {
+    return this.exclusive(async () => {
+      if (!googleSub(userId)) return null;
+      return await this.ctx.storage.get(`monitor:${userId}`);
+    });
+  }
+
+  async saveMonitorCursor(userId: string, cursor: MonitorCursor): Promise<void> {
+    return this.exclusive(async () => {
+      if (!googleSub(userId)) throw new Error("The Google account id is invalid.");
+      const parsed = parseCursor(cursor);
+      if (!parsed) throw new Error("The monitor cursor is invalid.");
+      await this.ctx.storage.put(`monitor:${userId}`, parsed);
     });
   }
 
@@ -979,6 +1003,7 @@ type TaskQuery = {
   completed_min?: string;
   completed_max?: string;
   updated_min?: string;
+  updated_min_rfc3339?: string;
 };
 async function listTasks(env: Env, accountId: string, input: TaskQuery) {
   const data = await google(env, accountId, withQuery(`/tasks/v1/lists/${idPath(input.task_list_id)}/tasks`, {
@@ -992,7 +1017,7 @@ async function listTasks(env: Env, accountId: string, input: TaskQuery) {
     dueMax: input.due_max ? `${input.due_max}T23:59:59.000Z` : undefined,
     completedMin: input.completed_min ? `${input.completed_min}T00:00:00.000Z` : undefined,
     completedMax: input.completed_max ? `${input.completed_max}T23:59:59.000Z` : undefined,
-    updatedMin: input.updated_min ? `${input.updated_min}T00:00:00.000Z` : undefined,
+    updatedMin: googleUpdatedMin(input),
   }));
   const tasks = Array.isArray(data?.items) ? data.items.map((item: unknown) => cleanTask(item)) : [];
   return { task_list_id: input.task_list_id, tasks, next_page_token: nextPage(data) };
@@ -1447,6 +1472,69 @@ function discoveryPath(pathname: string): boolean {
     || pathname === "/.well-known/oauth-protected-resource/mcp"
     || pathname === "/.well-known/oauth-authorization-server";
 }
+async function postMonitor(env: Env, body: MonitorBody): Promise<boolean> {
+  const url = grokWebhookUrl(env.GROK_WEBHOOK_URL ?? "");
+  const key = webhookKey(env.GROK_WEBHOOK_KEY ?? "");
+  if (!url || !key) return false;
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      redirect: "manual",
+      headers: {
+        Authorization: `Bearer ${key}`,
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify(body),
+    });
+    const redirected = isRedirect(response);
+    await response.body?.cancel();
+    if (!webhookAccepted(response.status, redirected)) {
+      console.log(JSON.stringify({ monitor: "webhook_rejected", status: response.status }));
+      return false;
+    }
+    return true;
+  } catch {
+    console.log(JSON.stringify({ monitor: "webhook_failed" }));
+    return false;
+  }
+}
+
+async function runTaskMonitor(env: Env): Promise<void> {
+  const report = await runMonitor({
+    now: Date.now(),
+    webhookUrl: env.GROK_WEBHOOK_URL ?? "",
+    webhookKey: env.GROK_WEBHOOK_KEY ?? "",
+    accounts: () => vault(env).connectedAccounts(),
+    loadCursor: (accountId) => vault(env).monitorCursor(accountId),
+    saveCursor: (accountId, cursor) => vault(env).saveMonitorCursor(accountId, cursor),
+    listPage: async (accountId, updatedMin, pageToken) => {
+      const page = await listTasks(env, accountId, {
+        task_list_id: MONITOR_TASK_QUERY.task_list_id,
+        page_token: pageToken,
+        limit: MONITOR_TASK_QUERY.limit,
+        include_completed: MONITOR_TASK_QUERY.include_completed,
+        include_hidden: MONITOR_TASK_QUERY.include_hidden,
+        include_deleted: MONITOR_TASK_QUERY.include_deleted,
+        include_assigned: MONITOR_TASK_QUERY.include_assigned,
+        updated_min_rfc3339: updatedMin,
+      });
+      return {
+        tasks: page.tasks.flatMap((item) => {
+          const id = item.id;
+          if (typeof id !== "string" || !id) return [];
+          return [{ ...item, id, updated: typeof item.updated === "string" ? item.updated : null }];
+        }),
+        next_page_token: page.next_page_token,
+      };
+    },
+    postWebhook: (body) => postMonitor(env, body),
+  });
+  console.log(JSON.stringify(report.skipped
+    ? { monitor: "skipped", reason: report.skipped }
+    : { monitor: "checked", baselined: report.baselined, posted_tasks: report.postedTasks, held: report.held, idle: report.idle }));
+}
+
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
@@ -1464,5 +1552,8 @@ export default {
     if (url.pathname === "/oauth/status" && request.method === "GET") return Response.json(await vault(env).connection(accountId), { headers: { "Cache-Control": "no-store" } });
     if (url.pathname === "/mcp") return handlerFor(env, accountId)(request, env, ctx);
     return Response.json({ error: "not_found" }, { status: 404 });
-  }
+  },
+  async scheduled(_controller, env, _ctx) {
+    await runTaskMonitor(env);
+  },
 } satisfies ExportedHandler<Env>;

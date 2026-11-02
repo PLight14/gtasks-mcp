@@ -63,6 +63,23 @@ npm run deploy
 
 Point Grok Bot at `https://<your-worker-host>/mcp` with no bearer header. After Grok Bot's own approval, the worker opens Google. Approve while signed in as the account whose tasks this connection should use.
 
+## Monitor
+
+Every five minutes the worker reads `@default` for tasks changed since the last check Grok accepted. The check asks for completed, hidden, and deleted tasks together. A task completed in the Google Tasks app is hidden, and it is left out of the result unless hidden tasks are requested.
+
+The webhook is a Grok Bot routine. It is not part of Google sign-in. Ask the Bot to add a webhook trigger, then open the routine on desktop and copy the POST URL and the key. Tell the routine what to do with the JSON body, including tasks whose `status` is `completed`.
+
+```bash
+npx wrangler secret put GROK_WEBHOOK_URL
+npx wrangler secret put GROK_WEBHOOK_KEY
+```
+
+Paste the key on its own. A value copied with `Bearer ` in front is accepted. Leave both out of `wrangler.toml`.
+
+The first check after the secrets are set and a Google account is connected records the start time and sends nothing. Later checks POST each changed task as it is now. No changes means no POST. Anything other than HTTP 200 leaves the checkpoint in place, and the next check sends those tasks again. Disconnecting the Google account stops the posts. The secrets can stay.
+
+The body has `source`, `task_list_id`, `account` (`id` and `email`), and `tasks`. Task contents and the webhook key are not logged. The schedule is `*/5 * * * *`, about 288 reads a day. The Tasks API courtesy limit is 50,000 queries a day.
+
 `GET /oauth/start` in a browser does the same Google consent without Grok Bot. A visit from another site stops on a confirmation step first.
 
 ## OAuth
