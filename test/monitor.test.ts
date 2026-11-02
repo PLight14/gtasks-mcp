@@ -6,7 +6,9 @@ import {
   changesToSend,
   googleUpdatedMin,
   grokWebhookUrl,
+  monitorStatus,
   parseCursor,
+  parseMonitorRun,
   runMonitor,
   webhookAccepted,
   webhookKey,
@@ -219,6 +221,34 @@ test("no changes move the cursor forward without calling the webhook", async () 
   assert.equal(report.idle, 1);
   assert.equal(deps.posted.length, 0);
   assert.deepEqual(deps.saved, [{ since: NOW, sent: [] }]);
+});
+
+test("the status endpoint reports the last run time", () => {
+  const checked = parseMonitorRun({ at: NOW, skipped: null, baselined: 0, postedTasks: 2, held: 0, idle: 0, failed: false });
+  assert.deepEqual(monitorStatus(checked), {
+    last_run_at: "2026-11-02T19:00:00.000Z",
+    result: "checked",
+    reason: null,
+    baselined: 0,
+    posted_tasks: 2,
+    held: 0,
+    idle: 0,
+  });
+  const skipped = parseMonitorRun({ at: NOW, skipped: "webhook", baselined: 0, postedTasks: 0, held: 0, idle: 0, failed: false });
+  assert.equal(monitorStatus(skipped).result, "skipped");
+  assert.equal(monitorStatus(skipped).reason, "webhook");
+  const failed = parseMonitorRun({ at: NOW, skipped: null, baselined: 0, postedTasks: 0, held: 0, idle: 0, failed: true });
+  assert.equal(monitorStatus(failed).result, "failed");
+  assert.deepEqual(monitorStatus(null), {
+    last_run_at: null,
+    result: null,
+    reason: null,
+    baselined: 0,
+    posted_tasks: 0,
+    held: 0,
+    idle: 0,
+  });
+  assert.equal(parseMonitorRun({ skipped: null }), null);
 });
 
 test("a list failure does not move the cursor", async () => {

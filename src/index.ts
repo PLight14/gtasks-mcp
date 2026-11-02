@@ -2,7 +2,7 @@ import { McpServer } from "@modelcontextprotocol/server";
 import { createMcpHandler } from "agents/mcp/server";
 import { DurableObject } from "cloudflare:workers";
 import { z } from "zod";
-import { MONITOR_TASK_QUERY, googleUpdatedMin, grokWebhookUrl, parseCursor, runMonitor, webhookAccepted, webhookKey, type MonitorBody, type MonitorCursor } from "./monitor";
+import { MONITOR_TASK_QUERY, googleUpdatedMin, grokWebhookUrl, monitorStatus, parseCursor, parseMonitorRun, runMonitor, webhookAccepted, webhookKey, type MonitorBody, type MonitorCursor, type MonitorRun } from "./monitor";
 
 const GOOGLE_SCOPE = "openid email https://www.googleapis.com/auth/tasks";
 const TASKS_SCOPE = "https://www.googleapis.com/auth/tasks";
@@ -482,6 +482,18 @@ export class OAuthVault extends DurableObject<Env> {
       const parsed = parseCursor(cursor);
       if (!parsed) throw new Error("The monitor cursor is invalid.");
       await this.ctx.storage.put(`monitor:${userId}`, parsed);
+    });
+  }
+
+  async monitorRun(): Promise<unknown> {
+    return this.exclusive(async () => this.ctx.storage.get("monitor_run"));
+  }
+
+  async saveMonitorRun(run: MonitorRun): Promise<void> {
+    return this.exclusive(async () => {
+      const parsed = parseMonitorRun(run);
+      if (!parsed) throw new Error("The monitor run is invalid.");
+      await this.ctx.storage.put("monitor_run", parsed);
     });
   }
 
@@ -1501,44 +1513,58 @@ async function postMonitor(env: Env, body: MonitorBody): Promise<boolean> {
 }
 
 async function runTaskMonitor(env: Env): Promise<void> {
-  const report = await runMonitor({
-    now: Date.now(),
-    webhookUrl: env.GROK_WEBHOOK_URL ?? "",
-    webhookKey: env.GROK_WEBHOOK_KEY ?? "",
-    accounts: () => vault(env).connectedAccounts(),
-    loadCursor: (accountId) => vault(env).monitorCursor(accountId),
-    saveCursor: (accountId, cursor) => vault(env).saveMonitorCursor(accountId, cursor),
-    listPage: async (accountId, updatedMin, pageToken) => {
-      const page = await listTasks(env, accountId, {
-        task_list_id: MONITOR_TASK_QUERY.task_list_id,
-        page_token: pageToken,
-        limit: MONITOR_TASK_QUERY.limit,
-        include_completed: MONITOR_TASK_QUERY.include_completed,
-        include_hidden: MONITOR_TASK_QUERY.include_hidden,
-        include_deleted: MONITOR_TASK_QUERY.include_deleted,
-        include_assigned: MONITOR_TASK_QUERY.include_assigned,
-        updated_min_rfc3339: updatedMin,
-      });
-      return {
-        tasks: page.tasks.flatMap((item) => {
-          const id = item.id;
-          if (typeof id !== "string" || !id) return [];
-          return [{ ...item, id, updated: typeof item.updated === "string" ? item.updated : null }];
-        }),
-        next_page_token: page.next_page_token,
-      };
-    },
-    postWebhook: (body) => postMonitor(env, body),
-  });
-  console.log(JSON.stringify(report.skipped
-    ? { monitor: "skipped", reason: report.skipped }
-    : { monitor: "checked", baselined: report.baselined, posted_tasks: report.postedTasks, held: report.held, idle: report.idle }));
+  const now = Date.now();
+  let run: MonitorRun;
+  try {
+    const report = await runMonitor({
+      now,
+      webhookUrl: env.GROK_WEBHOOK_URL ?? "",
+      webhookKey: env.GROK_WEBHOOK_KEY ?? "",
+      accounts: () => vault(env).connectedAccounts(),
+      loadCursor: (accountId) => vault(env).monitorCursor(accountId),
+      saveCursor: (accountId, cursor) => vault(env).saveMonitorCursor(accountId, cursor),
+      listPage: async (accountId, updatedMin, pageToken) => {
+        const page = await listTasks(env, accountId, {
+          task_list_id: MONITOR_TASK_QUERY.task_list_id,
+          page_token: pageToken,
+          limit: MONITOR_TASK_QUERY.limit,
+          include_completed: MONITOR_TASK_QUERY.include_completed,
+          include_hidden: MONITOR_TASK_QUERY.include_hidden,
+          include_deleted: MONITOR_TASK_QUERY.include_deleted,
+          include_assigned: MONITOR_TASK_QUERY.include_assigned,
+          updated_min_rfc3339: updatedMin,
+        });
+        return {
+          tasks: page.tasks.flatMap((item) => {
+            const id = item.id;
+            if (typeof id !== "string" || !id) return [];
+            return [{ ...item, id, updated: typeof item.updated === "string" ? item.updated : null }];
+          }),
+          next_page_token: page.next_page_token,
+        };
+      },
+      postWebhook: (body) => postMonitor(env, body),
+    });
+    run = { at: now, ...report, failed: false };
+    console.log(JSON.stringify(report.skipped
+      ? { monitor: "skipped", reason: report.skipped }
+      : { monitor: "checked", baselined: report.baselined, posted_tasks: report.postedTasks, held: report.held, idle: report.idle }));
+  } catch {
+    run = { at: now, skipped: null, baselined: 0, postedTasks: 0, held: 0, idle: 0, failed: true };
+    console.log(JSON.stringify({ monitor: "failed" }));
+  }
+  await vault(env).saveMonitorRun(run);
 }
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === "/health") return Response.json({ ok: true });
+    if (url.pathname === "/monitor") {
+      if (request.method !== "GET") return new Response("Method not allowed", { status: 405, headers: { Allow: "GET" } });
+      const status = monitorStatus(parseMonitorRun(await vault(env).monitorRun()));
+      return Response.json(status, { headers: { "Cache-Control": "no-store" } });
+    }
     if (discoveryPath(url.pathname)) return discovery(request, url);
     if (url.pathname === "/authorize") return authorize(request, env, url);
     if (url.pathname === "/register") return registerClient(request);

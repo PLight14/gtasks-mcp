@@ -80,6 +80,8 @@ The first check after the secrets are set and a Google account is connected reco
 
 The body has `source`, `task_list_id`, `account` (`id` and `email`), and `tasks`. Task contents and the webhook key are not logged. The schedule is `*/5 * * * *`, about 288 reads a day. The Tasks API courtesy limit is 50,000 queries a day.
 
+`GET /monitor` needs no token. `last_run_at` is the last time the schedule ran. `result` is `checked`, `skipped`, or `failed`. A skip names `webhook` or `account`. Before the first run, `last_run_at` is null. The response has no task contents.
+
 `GET /oauth/start` in a browser does the same Google consent without Grok Bot. A visit from another site stops on a confirmation step first.
 
 ## OAuth
@@ -128,6 +130,7 @@ Subtasks come back in a flat list with `parent` set. Assigned tasks cannot be gi
 - `GET /oauth/status` requires the bearer token from `/token`
 - `POST /mcp` requires that bearer token
 - `GET /health`
+- `GET /monitor` shows the last scheduled run. No token.
 
 ## Notes
 

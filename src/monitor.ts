@@ -26,6 +26,24 @@ export type MonitorReport = {
   held: number;
   idle: number;
 };
+export type MonitorRun = {
+  at: number;
+  skipped: "webhook" | "account" | null;
+  baselined: number;
+  postedTasks: number;
+  held: number;
+  idle: number;
+  failed: boolean;
+};
+export type MonitorStatus = {
+  last_run_at: string | null;
+  result: "checked" | "skipped" | "failed" | null;
+  reason: "webhook" | "account" | null;
+  baselined: number;
+  posted_tasks: number;
+  held: number;
+  idle: number;
+};
 export type MonitorDeps = {
   now: number;
   webhookUrl: string;
@@ -76,6 +94,37 @@ export function parseCursor(value: unknown): MonitorCursor | null {
     sent.push({ id: entry.id, updated: entry.updated });
   }
   return { since: record.since, sent };
+}
+
+function wholeCount(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+export function parseMonitorRun(value: unknown): MonitorRun | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Partial<MonitorRun>;
+  const baselined = wholeCount(record.baselined);
+  const postedTasks = wholeCount(record.postedTasks);
+  const held = wholeCount(record.held);
+  const idle = wholeCount(record.idle);
+  const skipped = record.skipped === null || record.skipped === "webhook" || record.skipped === "account" ? record.skipped : undefined;
+  if (typeof record.at !== "number" || !Number.isFinite(record.at) || skipped === undefined || record.failed !== true && record.failed !== false) return null;
+  if (baselined == null || postedTasks == null || held == null || idle == null) return null;
+  return { at: record.at, skipped, baselined, postedTasks, held, idle, failed: record.failed };
+}
+
+export function monitorStatus(run: MonitorRun | null): MonitorStatus {
+  if (!run) return { last_run_at: null, result: null, reason: null, baselined: 0, posted_tasks: 0, held: 0, idle: 0 };
+  const result = run.failed ? "failed" : run.skipped ? "skipped" : "checked";
+  return {
+    last_run_at: new Date(run.at).toISOString(),
+    result,
+    reason: run.skipped,
+    baselined: run.baselined,
+    posted_tasks: run.postedTasks,
+    held: run.held,
+    idle: run.idle,
+  };
 }
 
 function versionKey(id: string, updated: string): string {
