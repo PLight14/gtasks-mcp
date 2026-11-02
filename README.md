@@ -76,9 +76,9 @@ npx wrangler secret put GROK_WEBHOOK_KEY
 
 Paste the key on its own. A value copied with `Bearer ` in front is accepted. Leave both out of `wrangler.toml`.
 
-The first check after the secrets are set and a Google account is connected records the start time and sends nothing. Later checks POST each changed task as it is now. No changes means no POST. Anything other than HTTP 200 leaves the checkpoint in place, and the next check sends those tasks again. Disconnecting the Google account stops the posts. The secrets can stay.
+The first check after the secrets are set and a Google account is connected records the start time and sends nothing. Later checks POST each changed task as it is now, at most 10 per call. The oldest 10 go first. When more remain, the next check starts at the latest `updated` time in the batch that was accepted. No changes means no POST. Anything other than HTTP 200 leaves the checkpoint in place, and the next check sends those tasks again. Disconnecting the Google account stops the posts. The secrets can stay.
 
-The body has `source`, `task_list_id`, `account` (`id` and `email`), and `tasks`. Task contents and the webhook key are not logged. The schedule is `*/2 * * * *`, about 720 reads a day. The Tasks API courtesy limit is 50,000 queries a day.
+The body has `source`, `task_list_id`, `account` (`id` and `email`), and `tasks`. Each task has `id`, `title`, `status`, `due`, `deleted`, and `completed`. Task contents and the webhook key are not logged. The schedule is `*/2 * * * *`, about 720 reads a day. The Tasks API courtesy limit is 50,000 queries a day.
 
 `GET /monitor` needs no token. `last_run_at` is the last time the schedule ran. `result` is `checked`, `skipped`, or `failed`. A skip names `webhook` or `account`. Before the first run, `last_run_at` is null. The response has no task contents.
 

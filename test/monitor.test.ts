@@ -154,6 +154,12 @@ test("a completed hidden task is posted as it is now", async () => {
     hidden: true,
     completed: "2026-11-02T18:30:00.000Z",
     title: "File taxes",
+    notes: "secret details",
+    due: "2026-11-02",
+    web_view_link: "https://tasks.google.com/task/done",
+    position: "0000000000000001",
+    parent: "parent-task",
+    links: [{ link: "https://example.com/extra" }],
   });
   let sawUpdatedMin = "";
   const deps = harness({
@@ -170,9 +176,37 @@ test("a completed hidden task is posted as it is now", async () => {
   assert.equal(body.source, "google-tasks");
   assert.equal(body.task_list_id, "@default");
   assert.equal(body.account.email, "ada@example.com");
-  assert.deepEqual(body.tasks, [completed]);
+  assert.deepEqual(body.tasks, [{
+    id: "done",
+    title: "File taxes",
+    status: "completed",
+    due: "2026-11-02",
+    deleted: false,
+    completed: "2026-11-02T18:30:00.000Z",
+  }]);
+  assert.equal(JSON.stringify(body).includes("secret details"), false);
+  assert.equal(JSON.stringify(body).includes("example.com/extra"), false);
   assert.equal(JSON.stringify(body).includes("crsr_example_key"), false);
   assert.deepEqual(deps.saved, [{ since: NOW, sent: [] }]);
+});
+
+test("a check posts at most 10 tasks and continues from the latest one sent", async () => {
+  const tasks = Array.from({ length: 12 }, (_, index) => {
+    const minute = String(index + 1).padStart(2, "0");
+    return task({ id: `t${minute}`, updated: `2026-11-02T18:${minute}:00.000Z`, title: `Task ${minute}` });
+  });
+  const deps = harness({
+    listPage: async () => ({ tasks: [...tasks].reverse(), next_page_token: null }),
+  });
+  const report = await runMonitor(deps);
+  assert.equal(report.postedTasks, 10);
+  const body = deps.posted[0] as { tasks: { id: string }[] };
+  assert.deepEqual(body.tasks.map((item) => item.id), tasks.slice(0, 10).map((item) => item.id));
+  assert.equal(Object.hasOwn(body.tasks[0], "updated"), false);
+  assert.deepEqual(deps.saved, [{
+    since: Date.parse("2026-11-02T18:10:00.000Z"),
+    sent: [{ id: "t10", updated: "2026-11-02T18:10:00.000Z" }],
+  }]);
 });
 
 test("later pages are included and a repeated page token holds the cursor", async () => {

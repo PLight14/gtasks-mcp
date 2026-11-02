@@ -9,6 +9,7 @@ export const MONITOR_TASK_QUERY = {
 } as const;
 
 export const MONITOR_MAX_PAGES = 20;
+export const MONITOR_BATCH = 10;
 
 export type MonitorAccount = { id: string; email: string | null };
 export type MonitorCursor = { since: number; sent: { id: string; updated: string }[] };
@@ -17,7 +18,7 @@ export type MonitorBody = {
   source: "google-tasks";
   task_list_id: typeof MONITOR_TASK_QUERY.task_list_id;
   account: MonitorAccount;
-  tasks: MonitorTask[];
+  tasks: Record<string, unknown>[];
 };
 export type MonitorReport = {
   skipped: "webhook" | "account" | null;
@@ -127,6 +128,14 @@ export function monitorStatus(run: MonitorRun | null): MonitorStatus {
   };
 }
 
+const WEBHOOK_TASK_FIELDS = ["id", "title", "status", "due", "deleted", "completed"] as const;
+
+function webhookTask(task: MonitorTask): Record<string, unknown> {
+  const posted: Record<string, unknown> = {};
+  for (const field of WEBHOOK_TASK_FIELDS) posted[field] = task[field] ?? null;
+  return posted;
+}
+
 function versionKey(id: string, updated: string): string {
   return `${id}\0${updated}`;
 }
@@ -140,6 +149,24 @@ function atBoundary(updated: string | null, since: number): updated is string {
   if (!updated) return false;
   const ms = Date.parse(updated);
   return Number.isFinite(ms) && ms >= since;
+}
+
+function updatedMillis(updated: string | null): number {
+  if (!updated) return Number.NEGATIVE_INFINITY;
+  const ms = Date.parse(updated);
+  return Number.isFinite(ms) ? ms : Number.NEGATIVE_INFINITY;
+}
+
+export function batchForWebhook<T extends { id: string; updated: string | null }>(tasks: T[]): { batch: T[]; truncated: boolean } {
+  const sorted = [...tasks].sort((a, b) => updatedMillis(a.updated) - updatedMillis(b.updated));
+  return { batch: sorted.slice(0, MONITOR_BATCH), truncated: sorted.length > MONITOR_BATCH };
+}
+
+export function cursorAfterBatch(previous: MonitorCursor, pollStartedAt: number, batch: { id: string; updated: string | null }[], truncated: boolean): MonitorCursor {
+  if (!truncated) return advanceCursor(previous, pollStartedAt, batch);
+  const latest = batch.reduce((max, task) => Math.max(max, updatedMillis(task.updated)), Number.NEGATIVE_INFINITY);
+  if (!Number.isFinite(latest)) return previous;
+  return advanceCursor(previous, latest, batch);
 }
 
 export function advanceCursor(previous: MonitorCursor, pollStartedAt: number, delivered: { id: string; updated: string | null }[]): MonitorCursor {
@@ -202,8 +229,9 @@ export async function runMonitor(deps: MonitorDeps): Promise<MonitorReport> {
       report.held++;
       continue;
     }
-    const deliver = changesToSend(tasks, current);
-    if (deliver.length === 0) {
+    const ready = changesToSend(tasks, current);
+    const { batch, truncated } = batchForWebhook(ready);
+    if (batch.length === 0) {
       await deps.saveCursor(account.id, advanceCursor(current, deps.now, []));
       report.idle++;
       continue;
@@ -214,7 +242,7 @@ export async function runMonitor(deps: MonitorDeps): Promise<MonitorReport> {
         source: "google-tasks",
         task_list_id: MONITOR_TASK_QUERY.task_list_id,
         account,
-        tasks: deliver,
+        tasks: batch.map(webhookTask),
       });
     } catch {
       accepted = false;
@@ -223,8 +251,8 @@ export async function runMonitor(deps: MonitorDeps): Promise<MonitorReport> {
       report.held++;
       continue;
     }
-    await deps.saveCursor(account.id, advanceCursor(current, deps.now, deliver));
-    report.postedTasks += deliver.length;
+    await deps.saveCursor(account.id, cursorAfterBatch(current, deps.now, batch, truncated));
+    report.postedTasks += batch.length;
   }
   return report;
 }
