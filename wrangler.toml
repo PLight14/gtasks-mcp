@@ -15,4 +15,4 @@ GOOGLE_CLIENT_ID = "350799599363-h0or8rsmonqjnqacvgvv3iln4g5sjcvg.apps.googleuse
 MAX_ACCOUNTS = "1"
 
 [triggers]
-crons = ["*/5 * * * *"]
+crons = ["*/2 * * * *"]
