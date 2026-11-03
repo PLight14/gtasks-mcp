@@ -145,6 +145,11 @@ export function changesToSend<T extends { id: string; updated: string | null }>(
   return tasks.filter((task) => typeof task.updated !== "string" || !task.updated || !seen.has(versionKey(task.id, task.updated)));
 }
 
+// A completed task that is later deleted was already reported when it was completed.
+export function deletionOfCompleted(task: { status?: unknown; deleted?: unknown }): boolean {
+  return task.deleted === true && task.status === "completed";
+}
+
 function atBoundary(updated: string | null, since: number): updated is string {
   if (!updated) return false;
   const ms = Date.parse(updated);
@@ -229,7 +234,7 @@ export async function runMonitor(deps: MonitorDeps): Promise<MonitorReport> {
       report.held++;
       continue;
     }
-    const ready = changesToSend(tasks, current);
+    const ready = changesToSend(tasks, current).filter((task) => !deletionOfCompleted(task));
     const { batch, truncated } = batchForWebhook(ready);
     if (batch.length === 0) {
       await deps.saveCursor(account.id, advanceCursor(current, deps.now, []));

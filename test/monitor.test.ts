@@ -146,6 +146,52 @@ test("the first check records the start time and sends nothing", async () => {
   assert.deepEqual(deps.saved, [{ since: NOW, sent: [] }]);
 });
 
+test("a deletion of an already completed task is not posted", async () => {
+  const deps = harness({
+    listPage: async () => ({
+      tasks: [
+        task({
+          id: "cleared",
+          updated: "2026-11-02T18:10:00.000Z",
+          status: "completed",
+          hidden: true,
+          deleted: true,
+          completed: "2026-11-02T17:00:00.000Z",
+        }),
+        task({ id: "removed", updated: "2026-11-02T18:20:00.000Z", status: "needsAction", deleted: true }),
+      ],
+      next_page_token: null,
+    }),
+  });
+  const report = await runMonitor(deps);
+  assert.equal(report.postedTasks, 1);
+  const body = deps.posted[0] as { tasks: { id: string; deleted: boolean; status: string }[] };
+  assert.deepEqual(body.tasks.map((item) => item.id), ["removed"]);
+  assert.equal(body.tasks[0].deleted, true);
+  assert.equal(body.tasks[0].status, "needsAction");
+});
+
+test("only deletions of completed tasks advance the cursor without a webhook", async () => {
+  const deps = harness({
+    listPage: async () => ({
+      tasks: [task({
+        id: "cleared",
+        updated: "2026-11-02T18:10:00.000Z",
+        status: "completed",
+        hidden: true,
+        deleted: true,
+        completed: "2026-11-02T17:00:00.000Z",
+      })],
+      next_page_token: null,
+    }),
+  });
+  const report = await runMonitor(deps);
+  assert.equal(report.idle, 1);
+  assert.equal(report.postedTasks, 0);
+  assert.equal(deps.posted.length, 0);
+  assert.deepEqual(deps.saved, [{ since: NOW, sent: [] }]);
+});
+
 test("a completed hidden task is posted as it is now", async () => {
   const completed = task({
     id: "done",
